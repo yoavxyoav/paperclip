@@ -645,7 +645,7 @@ describe("startServer feedback export wiring", () => {
 
       expect(started.server).toBe(fakeServer);
       expect(environmentCustomImagesServiceMock.cleanupExpiredSetupSessions).toHaveBeenCalledTimes(1);
-      expect(setIntervalSpy).toHaveBeenCalledTimes(1);
+      expect(setIntervalSpy).toHaveBeenCalledWith(expect.any(Function), 30000);
     } finally {
       resolveSetupCleanup?.();
       await Promise.resolve();
