@@ -259,6 +259,7 @@ vi.mock("../realtime/live-events-ws.js", () => ({
 }));
 
 vi.mock("../services/index.js", () => ({
+  clearStaleAgentErrorReasons: vi.fn(async () => ({ cleared: 0 })),
   backfillLegacyToolOAuthTokens: vi.fn(async () => ({
     scannedConnections: 0,
     migratedConnections: 0,
@@ -620,6 +621,34 @@ describe("startServer feedback export wiring", () => {
       expect(routineServiceMock.tickScheduledTriggers).toHaveBeenCalledTimes(1);
       expect(environmentCustomImagesServiceMock.cleanupExpiredSetupSessions).toHaveBeenCalledTimes(2);
     } finally {
+      setIntervalSpy.mockRestore();
+    }
+  });
+
+  it("registers the heartbeat interval without waiting for startup maintenance sweeps", async () => {
+    loadConfigMock.mockReturnValue(buildTestConfig({
+      heartbeatSchedulerEnabled: true,
+      heartbeatSchedulerIntervalMs: 30000,
+    }));
+    let resolveSetupCleanup: (() => void) | null = null;
+    environmentCustomImagesServiceMock.cleanupExpiredSetupSessions.mockImplementationOnce(
+      () => new Promise((resolve) => {
+        resolveSetupCleanup = () => resolve({ scanned: 0, timedOut: 0, failed: 0 });
+      }),
+    );
+    const setIntervalSpy = vi
+      .spyOn(globalThis, "setInterval")
+      .mockImplementation((() => 1 as unknown as ReturnType<typeof setInterval>) as typeof setInterval);
+
+    try {
+      const started = await startServer();
+
+      expect(started.server).toBe(fakeServer);
+      expect(environmentCustomImagesServiceMock.cleanupExpiredSetupSessions).toHaveBeenCalledTimes(1);
+      expect(setIntervalSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      resolveSetupCleanup?.();
+      await Promise.resolve();
       setIntervalSpy.mockRestore();
     }
   });
