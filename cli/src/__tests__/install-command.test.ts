@@ -6,6 +6,7 @@ import {
   type CommandRunner,
   installCommand,
   installGitPayload,
+  prepareGitInstallPackageAssets,
   resolveGitHubRef,
   resolveGitInstallRequest,
   resolveGitInstallWorkspacePackages,
@@ -119,6 +120,8 @@ describe("managed install commands", () => {
         fs.mkdirSync(path.join(checkout, "cli"), { recursive: true });
         fs.writeFileSync(path.join(checkout, "cli", "package.json"), JSON.stringify({ version: "0.3.1" }));
         fs.mkdirSync(path.join(checkout, "scripts"), { recursive: true });
+        fs.mkdirSync(path.join(checkout, "skills", "paperclip"), { recursive: true });
+        fs.writeFileSync(path.join(checkout, "skills", "paperclip", "SKILL.md"), "# Paperclip\n");
         fs.writeFileSync(path.join(checkout, "scripts", "release-package-manifest.json"), JSON.stringify(packages.map(({ dir, name }) => ({ dir, name }))));
         for (const workspacePackage of packages) {
           fs.mkdirSync(path.join(checkout, workspacePackage.dir), { recursive: true });
@@ -178,7 +181,7 @@ describe("managed install commands", () => {
       file === "corepack" ||
       (file === "npm" && args[0] === "pack") ||
       (file === process.execPath && args[0]?.endsWith("prepare-bundled-package.mjs")));
-    expect(buildCalls).toHaveLength(9);
+    expect(buildCalls).toHaveLength(10);
     for (const call of buildCalls) {
       const env = call[2]?.env;
       expect(env, `${call[0]} ${call[1].join(" ")} must run with an explicit env`).toBeDefined();
@@ -186,6 +189,12 @@ describe("managed install commands", () => {
     }
     const uiPackCall = buildCalls.find(([file, , options]) => file === "corepack" && options?.env?.PAPERCLIP_RELEASE_REUSE_UI_DIST === "1");
     expect(uiPackCall).toBeDefined();
+    const uiDistCallIndex = runCommand.mock.calls.findIndex(([file, args]) =>
+      file === "bash" && args[0] === "scripts/prepare-server-ui-dist.sh");
+    const bundledPackageCallIndex = runCommand.mock.calls.findIndex(([file, args]) =>
+      file === process.execPath && args[0]?.endsWith("prepare-bundled-package.mjs"));
+    expect(uiDistCallIndex).toBeGreaterThan(-1);
+    expect(uiDistCallIndex).toBeLessThan(bundledPackageCallIndex);
   });
 
   it("resolves the complete server workspace dependency closure in dependency order", () => {
@@ -207,6 +216,19 @@ describe("managed install commands", () => {
       "@paperclipai/db",
       "@paperclipai/server",
     ]);
+  });
+
+  it("stages the same package skills assets as the release flow", () => {
+    const checkout = path.join(root, "checkout");
+    fs.mkdirSync(path.join(checkout, "skills", "paperclip"), { recursive: true });
+    fs.writeFileSync(path.join(checkout, "skills", "paperclip", "SKILL.md"), "# Paperclip\n");
+
+    prepareGitInstallPackageAssets(checkout);
+
+    for (const packageDir of ["server", "packages/adapters/claude-local", "packages/adapters/codex-local"]) {
+      expect(fs.readFileSync(path.join(checkout, packageDir, "skills", "paperclip", "SKILL.md"), "utf8"))
+        .toBe("# Paperclip\n");
+    }
   });
 
   it("includes child-process stderr in command failures", async () => {

@@ -278,6 +278,8 @@ export async function installGitPayload(repo: string, sha: string, runCommand: C
     await runCommand("corepack", ["pnpm", "install", "--frozen-lockfile"], { cwd: checkoutPath, env: buildEnv(), maxBuffer: 32 * 1024 * 1024 });
     await runCommand("bash", ["scripts/build-npm.sh", "--skip-checks", "--skip-typecheck"], { cwd: checkoutPath, env: buildEnv(), maxBuffer: 32 * 1024 * 1024 });
     await runCommand("corepack", ["pnpm", "-r", "--filter", "@paperclipai/server...", "--if-present", "run", "build"], { cwd: checkoutPath, env: buildEnv(), maxBuffer: 32 * 1024 * 1024 });
+    await runCommand("bash", ["scripts/prepare-server-ui-dist.sh"], { cwd: checkoutPath, env: buildEnv({ PAPERCLIP_RELEASE_REUSE_UI_DIST: "1" }), maxBuffer: 32 * 1024 * 1024 });
+    prepareGitInstallPackageAssets(checkoutPath);
     const metadata = JSON.parse(fs.readFileSync(path.join(checkoutPath, "cli", "package.json"), "utf8")) as { version: string };
     const workspacePackages = resolveGitInstallWorkspacePackages(checkoutPath);
     for (const [index, workspacePackage] of workspacePackages.entries()) {
@@ -304,6 +306,14 @@ export async function installGitPayload(repo: string, sha: string, runCommand: C
     fs.renameSync(stagedPayload, payloadPath);
     return { payloadPath, reused: false, version: metadata.version };
   } finally { fs.rmSync(stagingRoot, { recursive: true, force: true }); }
+}
+
+export function prepareGitInstallPackageAssets(checkoutPath: string): void {
+  for (const packageDir of ["server", "packages/adapters/claude-local", "packages/adapters/codex-local"]) {
+    const destination = path.join(checkoutPath, packageDir, "skills");
+    fs.rmSync(destination, { recursive: true, force: true });
+    fs.cpSync(path.join(checkoutPath, "skills"), destination, { recursive: true });
+  }
 }
 
 function pathContains(directory: string): boolean {
