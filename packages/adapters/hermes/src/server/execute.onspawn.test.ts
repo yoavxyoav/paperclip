@@ -104,6 +104,30 @@ describe("hermes-local adapter onSpawn forwarding", () => {
     expect(opts.onSpawn).toBe(onSpawn);
   });
 
+  it("does not emit --resume when the server reset removed session params", async () => {
+    const { ctx } = makeCtx();
+    await execute(ctx as any);
+
+    const mocked = vi.mocked(serverUtils.runChildProcess);
+    const lastCall = mocked.mock.calls[mocked.mock.calls.length - 1];
+    const args = lastCall[2] as string[];
+    expect(args).not.toContain("--resume");
+  });
+
+  it("emits --resume for a valid non-reset continuation", async () => {
+    const { ctx } = makeCtx();
+    (ctx.runtime as { sessionParams: Record<string, unknown> | null }).sessionParams = {
+      sessionId: "valid-continuation",
+    };
+    await execute(ctx as any);
+
+    const mocked = vi.mocked(serverUtils.runChildProcess);
+    const lastCall = mocked.mock.calls[mocked.mock.calls.length - 1];
+    const args = lastCall[2] as string[];
+    expect(args).toContain("--resume");
+    expect(args[args.indexOf("--resume") + 1]).toBe("valid-continuation");
+  });
+
   it("runChildProcess opts type includes onSpawn", () => {
     // Type-level assertion: if onSpawn were removed from the type,
     // this file would fail to compile. The runtime test above catches

@@ -5415,6 +5415,20 @@ export function parseSessionCompactionPolicy(
     .policy;
 }
 
+export function selectPreviousSessionParamsForRun(input: {
+  resetTaskSession: boolean;
+  explicitResumeSessionParams: Record<string, unknown> | null;
+  explicitResumeSessionDisplayParams: Record<string, unknown> | null;
+  persistedTaskSessionParams: Record<string, unknown> | null;
+}): Record<string, unknown> | null {
+  if (input.resetTaskSession) return null;
+  return (
+    input.explicitResumeSessionParams ??
+    input.explicitResumeSessionDisplayParams ??
+    input.persistedTaskSessionParams
+  );
+}
+
 export function resolveRuntimeSessionParamsForWorkspace(input: {
   agentId: string;
   previousSessionParams: Record<string, unknown> | null;
@@ -21070,22 +21084,24 @@ export function heartbeatService(
       const sessionResetReason =
         sessionConfigFreshness.reasons.join("; ") || null;
       const taskSessionForRun = resetTaskSession ? null : taskSession;
-      const previousSessionParams =
-        explicitResumeSessionParams ??
-        (isCanonicalSessionIdForAdapter(
+      const previousSessionParams = selectPreviousSessionParamsForRun({
+        resetTaskSession,
+        explicitResumeSessionParams,
+        explicitResumeSessionDisplayParams: isCanonicalSessionIdForAdapter(
           agent.adapterType,
           explicitResumeSessionDisplayId,
         )
           ? { sessionId: explicitResumeSessionDisplayId }
-          : null) ??
-        normalizeResumeParamsForAdapter(
+          : null,
+        persistedTaskSessionParams: normalizeResumeParamsForAdapter(
           agent.adapterType,
           stripPaperclipSessionMetadataFromSessionParams(
             sessionCodec.deserialize(
               taskSessionForRun?.sessionParamsJson ?? null,
             ),
           ),
-        );
+        ),
+      });
       const {
         selectedEnvironmentDriver: lowTrustPreflightEnvironmentDriver,
         workspace: resolvedWorkspace,

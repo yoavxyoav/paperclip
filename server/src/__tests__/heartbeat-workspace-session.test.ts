@@ -36,6 +36,7 @@ import {
   requiresPushCapabilityPreflight,
   resolveWorkspaceAfterLowTrustPreflight,
   resolveRuntimeSessionParamsForWorkspace,
+  selectPreviousSessionParamsForRun,
   shouldDeferFollowupWakeForSameIssue,
   stripHostWorkspaceProvisionForLowTrustSandbox,
   stripWorkspaceRuntimeFromExecutionRunConfig,
@@ -2210,6 +2211,28 @@ function sessionParamsWithConfigMetadata(
 }
 
 describe("effective run session config freshness", () => {
+  it("drops every resume source when effective configuration requires a reset", () => {
+    expect(
+      selectPreviousSessionParamsForRun({
+        resetTaskSession: true,
+        explicitResumeSessionParams: { sessionId: "explicit-session" },
+        explicitResumeSessionDisplayParams: { sessionId: "display-session" },
+        persistedTaskSessionParams: { sessionId: "persisted-session" },
+      }),
+    ).toBeNull();
+  });
+
+  it("preserves explicit continuation precedence when no reset is required", () => {
+    expect(
+      selectPreviousSessionParamsForRun({
+        resetTaskSession: false,
+        explicitResumeSessionParams: { sessionId: "explicit-session" },
+        explicitResumeSessionDisplayParams: { sessionId: "display-session" },
+        persistedTaskSessionParams: { sessionId: "persisted-session" },
+      }),
+    ).toEqual({ sessionId: "explicit-session" });
+  });
+
   it("resets when effective adapter config changes after model/profile/env resolution", async () => {
     const base = await buildSessionConfigMetadata();
     const next = await buildSessionConfigMetadata({
