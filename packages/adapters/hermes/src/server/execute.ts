@@ -19,6 +19,7 @@
  */
 
 import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 
 import type {
@@ -73,6 +74,82 @@ function cfgStringArray(v: unknown): string[] | undefined {
   return Array.isArray(v) && v.every((i) => typeof i === "string")
     ? (v as string[])
     : undefined;
+}
+
+function sanitizeRouteBaseUrl(value: string | undefined): string {
+  if (!value) return "";
+  try {
+    const url = new URL(value);
+    url.username = "";
+    url.password = "";
+    url.search = "";
+    url.hash = "";
+    return url.toString().replace(/\/$/, value.endsWith("/") ? "/" : "");
+  } catch {
+    return "";
+  }
+}
+
+const ROUTE_ENV_KEYS = new Set([
+  "AI_GATEWAY_BASE_URL", "ARCEE_BASE_URL", "AZURE_FOUNDRY_BASE_URL",
+  "COPILOT_ACP_BASE_URL", "DASHSCOPE_BASE_URL", "DEEPSEEK_BASE_URL",
+  "GEMINI_BASE_URL", "GLM_BASE_URL", "GMI_BASE_URL", "HF_BASE_URL",
+  "HERMES_BASE_URL", "HERMES_CODEX_BASE_URL", "HERMES_INFERENCE_MODEL",
+  "HERMES_QWEN_BASE_URL", "HERMES_XAI_BASE_URL", "KILOCODE_BASE_URL",
+  "KIMI_BASE_URL", "MINIMAX_BASE_URL", "MINIMAX_CN_BASE_URL",
+  "NOUS_BASE_URL", "NOUS_INFERENCE_BASE_URL", "NOVITA_BASE_URL",
+  "OLLAMA_BASE_URL", "OPENAI_BASE_URL", "OPENROUTER_BASE_URL",
+  "TOKENHUB_BASE_URL", "XAI_BASE_URL", "XIAOMI_BASE_URL",
+]);
+const SAFE_EXTRA_ARG_ARITY = new Map<string, 0 | 1>([
+  ["--accept-hooks", 0], ["--ignore-rules", 0], ["--no-restore-cwd", 0],
+  ["--pass-session-id", 0], ["--reasoning", 1], ["--reasoning-effort", 1],
+  ["--skills", 1], ["--source", 1], ["--verbose", 0], ["-s", 1], ["-v", 0],
+]);
+
+function assertSafeExtraArgs(extraArgs: string[] | undefined): void {
+  if (!extraArgs?.length) return;
+  for (let index = 0; index < extraArgs.length; index += 1) {
+    const token = extraArgs[index]!;
+    const equalsAt = token.indexOf("=");
+    const flag = equalsAt > 0 ? token.slice(0, equalsAt) : token;
+    const arity = SAFE_EXTRA_ARG_ARITY.get(flag);
+    if (arity === undefined) throw new Error(`Hermes extraArgs flag is not permitted by route attestation: ${flag}`);
+    if (arity === 0) {
+      if (equalsAt > 0) throw new Error(`Hermes extraArgs flag does not accept a value: ${flag}`);
+      continue;
+    }
+    if (equalsAt > 0) {
+      if (!token.slice(equalsAt + 1)) throw new Error(`Hermes extraArgs flag requires a value: ${flag}`);
+      continue;
+    }
+    const value = extraArgs[index + 1];
+    if (!value || value.startsWith("-")) throw new Error(`Hermes extraArgs flag requires a value: ${flag}`);
+    index += 1;
+  }
+}
+
+async function assertNoUnattestedRouteOverrides(
+  extraArgs: string[] | undefined,
+  env: Record<string, string>,
+  hermesHome: string,
+): Promise<void> {
+  assertSafeExtraArgs(extraArgs);
+  const inheritedRouteKey = Object.keys(env).find((key) => ROUTE_ENV_KEYS.has(key));
+  if (inheritedRouteKey) throw new Error(`Hermes environment route override is not attestable: ${inheritedRouteKey}`);
+  try {
+    const profileEnv = await fs.readFile(path.join(hermesHome, ".env"), "utf-8");
+    const profileRouteKey = profileEnv.split("\n").map((line) => line.trim()).find((line) => {
+      if (!line || line.startsWith("#")) return false;
+      const key = line.replace(/^export\s+/, "").split("=", 1)[0]?.trim() ?? "";
+      return ROUTE_ENV_KEYS.has(key);
+    });
+    if (profileRouteKey) {
+      throw new Error(`Hermes profile .env route override is not attestable: ${profileRouteKey.replace(/^export\s+/, "").split("=", 1)[0]}`);
+    }
+  } catch (err) {
+    if (err instanceof Error && err.message.startsWith("Hermes profile .env route override")) throw err;
+  }
 }
 
 export function resolveHermesCommand(config: Record<string, unknown>): string {
@@ -384,16 +461,21 @@ export async function execute(
   // This ensures that even if the agent was created before provider tracking
   // was added, or if the model was changed without updating provider, the
   // correct provider is still used.
+  const userEnv = config.env as Record<string, string> | undefined;
+  const env: Record<string, string> = {
+    ...(process.env as Record<string, string>),
+    ...(userEnv && typeof userEnv === "object" ? userEnv : {}),
+    ...buildPaperclipEnv(ctx.agent),
+    ...buildRuntimeToolsEnv(ctx.runtimeTools),
+  };
+  const configuredHermesHome = cfgString(env.HERMES_HOME) || path.join(os.homedir(), ".hermes");
+  let canonicalHermesHome = path.resolve(configuredHermesHome);
+  try { canonicalHermesHome = await fs.realpath(canonicalHermesHome); } catch { /* stable absolute fallback */ }
+  env.HERMES_HOME = canonicalHermesHome;
   let detectedConfig: Awaited<ReturnType<typeof detectModel>> | null = null;
   const explicitProvider = cfgString(config.provider);
 
-  if (!explicitProvider) {
-    try {
-      detectedConfig = await detectModel();
-    } catch {
-      // Non-fatal — detection failure shouldn't block execution
-    }
-  }
+  try { detectedConfig = await detectModel(path.join(canonicalHermesHome, "config.yaml")); } catch { /* non-fatal */ }
 
   const { provider: resolvedProvider, resolvedFrom } = resolveProvider({
     explicitProvider,
@@ -404,6 +486,10 @@ export async function execute(
     detectedApiMode: detectedConfig?.apiMode,
     model,
   });
+  const detectedRouteMatchesModel = Boolean(detectedConfig && (model === "auto" || detectedConfig.model === model));
+  const effectiveRouteProvider = resolvedProvider === "auto" && detectedRouteMatchesModel && detectedConfig?.provider
+    ? detectedConfig.provider : resolvedProvider;
+  const effectiveRouteModel = model === "auto" && detectedConfig?.model ? detectedConfig.model : model;
 
   // ── Load agent instructions file (Paperclip instruction bundles) ──────
   // Paperclip can materialize managed instructions into instructionsFilePath;
@@ -444,7 +530,7 @@ export async function execute(
   const args: string[] = ["chat", "-q", prompt];
   if (useQuiet) args.push("-Q");
 
-  if (model) {
+  if (model && model !== "auto") {
     args.push("-m", model);
   }
 
@@ -486,14 +572,6 @@ export async function execute(
   }
 
   // ── Build environment ──────────────────────────────────────────────────
-  const userEnv = config.env as Record<string, string> | undefined;
-  const env: Record<string, string> = {
-    ...(process.env as Record<string, string>),
-    ...(userEnv && typeof userEnv === "object" ? userEnv : {}),
-    ...buildPaperclipEnv(ctx.agent),
-    ...buildRuntimeToolsEnv(ctx.runtimeTools),
-  };
-
   if (ctx.runId) env.PAPERCLIP_RUN_ID = ctx.runId;
 
   // PAPERCLIP_API_KEY is never accepted from config — the harness-minted run
@@ -511,6 +589,8 @@ export async function execute(
   if (envCommentId) env.PAPERCLIP_WAKE_COMMENT_ID = envCommentId;
   const wakePayloadJson = stringifyPaperclipWakePayload(ctxContext.paperclipWake);
   if (wakePayloadJson) env.PAPERCLIP_WAKE_PAYLOAD_JSON = wakePayloadJson;
+
+  await assertNoUnattestedRouteOverrides(extraArgs, env, canonicalHermesHome);
 
   // ── Resolve working directory ──────────────────────────────────────────
   const cwd =
@@ -532,6 +612,21 @@ export async function execute(
       `[hermes] Resuming session: ${prevSessionId}\n`,
     );
   }
+
+  await ctx.onMeta?.({
+    adapterType: "hermes_local",
+    command: "hermes",
+    resolvedHermesRoute: {
+      home: canonicalHermesHome,
+      provider: effectiveRouteProvider,
+      model: effectiveRouteModel,
+      baseUrl: sanitizeRouteBaseUrl(
+        detectedRouteMatchesModel && (!explicitProvider || detectedConfig?.provider === explicitProvider)
+          ? detectedConfig?.baseUrl : undefined,
+      ),
+      provenance: "hermes_adapter_effective_config",
+    },
+  });
 
   // ── Execute ────────────────────────────────────────────────────────────
   // Hermes writes non-error noise to stderr (MCP init, INFO logs, etc).

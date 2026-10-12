@@ -156,6 +156,14 @@ export interface AdapterInvocationMeta {
   prompt?: string;
   promptMetrics?: Record<string, number>;
   context?: Record<string, unknown>;
+  /** Server-adapter-owned effective Hermes route proof. Never populated from task output. */
+  resolvedHermesRoute?: {
+    home: string;
+    provider: string;
+    model: string;
+    baseUrl: string;
+    provenance: "hermes_adapter_effective_config";
+  };
 }
 
 export interface AdapterRuntimeMcpServer {

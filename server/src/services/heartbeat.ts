@@ -293,6 +293,22 @@ import {
   nativeChatWorkspaceMatches,
 } from "./native-runtime/native-chat-workspace.js";
 import { trackAgentFirstHeartbeat } from "@paperclipai/shared/telemetry";
+
+export function buildServerOwnedHermesRouteState(
+  adapterType: string,
+  meta: AdapterInvocationMeta,
+  configFingerprint: string,
+) {
+  const route = meta.resolvedHermesRoute;
+  if (
+    adapterType !== "hermes_local" ||
+    route?.provenance !== "hermes_adapter_effective_config" ||
+    !route.home || !route.provider || !route.model || !route.baseUrl ||
+    !route.provider.toLowerCase().startsWith("custom") ||
+    !route.model.toLowerCase().startsWith("gemma4:")
+  ) return null;
+  return { ...route, configFingerprint, provenance: "server_adapter_invocation" as const };
+}
 import { getTelemetryClient } from "../telemetry.js";
 import {
   emitAgentTaskRun,
@@ -22601,6 +22617,20 @@ export function heartbeatService(
           }
         }
         const onAdapterMeta = async (meta: AdapterInvocationMeta) => {
+          const route = buildServerOwnedHermesRouteState(
+            agent.adapterType,
+            meta,
+            sessionConfigMetadata.fingerprint,
+          );
+          if (route) {
+            const runtimeState = await ensureRuntimeState(agent);
+            const priorState = runtimeState.stateJson && typeof runtimeState.stateJson === "object"
+              ? runtimeState.stateJson as Record<string, unknown> : {};
+            await db.update(agentRuntimeState).set({
+              stateJson: { ...priorState, resolvedHermesRoute: route },
+              updatedAt: new Date(),
+            }).where(eq(agentRuntimeState.agentId, agent.id));
+          }
           if (meta.env && secretKeys.size > 0) {
             for (const key of secretKeys) {
               if (key in meta.env) meta.env[key] = "***REDACTED***";
