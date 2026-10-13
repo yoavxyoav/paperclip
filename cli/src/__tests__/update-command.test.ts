@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { writeManagedShim, flipCurrentAtomic, initializeInstallStore, payloadPathFor, readInstallManifest, resolveInstallStorePaths, writeInstallManifestAtomic, type InstallManifest, type InstallRecord } from "../install-store.js";
 import type { CommandRunner } from "../commands/install.js";
 import { compareVersions, detectInstallMode, resolveUpdateRequest, rollbackManagedInstall, updateCommand } from "../commands/update.js";
+import { LaunchdServiceManager, renderLaunchdPlist, type CommandRunner as ServiceCommandRunner } from "../services/service-manager.js";
 
 let root: string;
 let previousHome: string | undefined;
@@ -84,6 +85,41 @@ describe("update command", () => {
     } finally {
       Object.defineProperty(process.versions, "node", nodeVersion);
     }
+  });
+
+  it("preserves the installed launchd PATH during a managed rollback restart", async () => {
+    const paths = resolveInstallStorePaths(); initializeInstallStore(paths);
+    const oldPayload = payloadPathFor(paths, "npm", "1.0.0"); createPayload(oldPayload, "1.0.0");
+    const payload = payloadPathFor(paths, "npm", "2.0.0"); const executablePath = createPayload(payload, "2.0.0");
+    flipCurrentAtomic(payload, paths);
+    writeInstallManifestAtomic({ schemaVersion: 1, ...record(payload, "2.0.0"), previous: [record(oldPayload, "1.0.0")] }, paths);
+
+    const userHome = path.join(root, "service-home");
+    const runner: ServiceCommandRunner = async () => ({ stdout: "", stderr: "" });
+    const manager = new LaunchdServiceManager("default", runner, path.join(userHome, ".paperclip"), path.join(userHome, ".local/bin/paperclipai"), userHome);
+    const requiredPath = "/Users/alice/.hermes/bin:/Users/alice/.local/bin:/usr/bin:/bin";
+    fs.mkdirSync(path.dirname(manager.definitionPath), { recursive: true });
+    fs.writeFileSync(manager.definitionPath, renderLaunchdPlist({
+      instanceId: "default",
+      shimPath: path.join(userHome, ".local/bin/paperclipai"),
+      homeDir: path.join(userHome, ".paperclip"),
+      stdoutPath: path.join(userHome, "service.out"),
+      stderrPath: path.join(userHome, "service.err"),
+      preservedPath: requiredPath,
+    }));
+
+    await updateCommand({ rollback: true }, {
+      paths,
+      executablePath,
+      restartActiveService: async (version) => {
+        expect(version).toBe("1.0.0");
+        await manager.restart();
+        return true;
+      },
+    });
+
+    expect(readInstallManifest(paths)?.version).toBe("1.0.0");
+    expect(fs.readFileSync(manager.definitionPath, "utf8")).toContain(`<key>PATH</key><string>${requiredPath}</string>`);
   });
 
   it("orders SemVer prerelease identifiers numerically", () => {

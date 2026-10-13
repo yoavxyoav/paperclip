@@ -26,7 +26,7 @@ import {
   writeInstallManifestAtomic,
 } from "../install-store.js";
 import { resolveCliVersion } from "../version.js";
-import { systemdServiceName } from "../services/service-manager.js";
+import { LaunchdServiceManager, renderLaunchdPlist, systemdServiceName, type CommandRunner as ServiceCommandRunner } from "../services/service-manager.js";
 
 const ORIGINAL_ENV = { ...process.env };
 
@@ -176,6 +176,40 @@ describe("managed install commands", () => {
     expect(stagedWorkspacePackCall?.[1]).toContain("--ignore-scripts");
     const installCall = runCommand.mock.calls.find(([command, args]) => command === "npm" && args[0] === "install");
     expect(installCall?.[1].filter((arg) => arg.endsWith(".tgz"))).toHaveLength(4);
+  });
+
+  it("activates a git payload without touching launchd before a new CLI restart preserves PATH", async () => {
+    const sha = "e".repeat(40);
+    const runCommand = createGitCheckoutRunCommand(sha);
+    const userHome = process.env.HOME!;
+    const serviceRunnerCalls: string[] = [];
+    const serviceRunner: ServiceCommandRunner = async (command, args) => {
+      serviceRunnerCalls.push([command, ...args].join(" "));
+      return { stdout: "", stderr: "" };
+    };
+    const manager = new LaunchdServiceManager("default", serviceRunner, process.env.PAPERCLIP_HOME!, path.join(userHome, ".local/bin/paperclipai"), userHome);
+    const requiredPath = "/Users/alice/.hermes/bin:/Users/alice/.local/bin:/usr/bin:/bin";
+    fs.mkdirSync(path.dirname(manager.definitionPath), { recursive: true });
+    const originalDefinition = renderLaunchdPlist({
+      instanceId: "default",
+      shimPath: path.join(userHome, ".local/bin/paperclipai"),
+      homeDir: process.env.PAPERCLIP_HOME!,
+      stdoutPath: path.join(process.env.PAPERCLIP_HOME!, "service.out"),
+      stderrPath: path.join(process.env.PAPERCLIP_HOME!, "service.err"),
+      preservedPath: requiredPath,
+    });
+    fs.writeFileSync(manager.definitionPath, originalDefinition);
+
+    await installCommand({ ref: sha, repo: "HenkDz/paperclip", yes: true }, { runCommand });
+
+    expect(fs.readFileSync(manager.definitionPath, "utf8")).toBe(originalDefinition);
+    expect(serviceRunnerCalls).toEqual([]);
+
+    // This represents the required second process: invoking the managed shim
+    // after activation loads the newly installed CLI before the first restart.
+    await manager.restart();
+    expect(fs.readFileSync(manager.definitionPath, "utf8")).toContain(`<key>PATH</key><string>${requiredPath}</string>`);
+    expect(serviceRunnerCalls).toContain(`launchctl kickstart -k gui/${process.getuid?.() ?? 0}/ing.paperclip.paperclipai`);
   });
 
   it("builds git checkouts with NODE_ENV cleared so ambient production mode keeps devDependencies", async () => {

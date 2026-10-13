@@ -102,6 +102,12 @@ export function extractExecutableFromLaunchdPlist(content: string): string | nul
   return match ? unescapeXml(match[1]) : null;
 }
 
+export function extractPathFromLaunchdPlist(content: string): string | null {
+  const match = content.match(/<key>PATH<\/key>\s*<string>([^<]*)<\/string>/);
+  const value = match ? unescapeXml(match[1]).trim() : "";
+  return value.length > 0 ? value : null;
+}
+
 // The service definition executes this path directly: existence is not
 // enough — a directory or a non-executable file would satisfy fs.access's
 // default mode and still crash the supervisor at spawn.
@@ -148,7 +154,7 @@ WantedBy=default.target
 `;
 }
 
-export function renderLaunchdPlist(input: { instanceId: string; shimPath: string; homeDir: string; stdoutPath: string; stderrPath: string }): string {
+export function renderLaunchdPlist(input: { instanceId: string; shimPath: string; homeDir: string; stdoutPath: string; stderrPath: string; preservedPath?: string | null }): string {
   const label = launchdServiceName(input.instanceId);
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -164,6 +170,7 @@ export function renderLaunchdPlist(input: { instanceId: string; shimPath: string
     <key>PAPERCLIP_SERVICE_MANAGED</key><string>1</string>
     <key>PAPERCLIP_INSTANCE_ID</key><string>${escapeXml(input.instanceId)}</string>
     <key>PAPERCLIP_HOME</key><string>${escapeXml(input.homeDir)}</string>
+${input.preservedPath ? `    <key>PATH</key><string>${escapeXml(input.preservedPath)}</string>\n` : ""}
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
@@ -291,6 +298,23 @@ export class LaunchdServiceManager implements ServiceManager {
 
   renderDefinition(): string { return renderLaunchdPlist({ instanceId: this.instanceId, shimPath: this.shimPath, homeDir: this.homeDir, stdoutPath: this.stdoutPath, stderrPath: this.stderrPath }); }
 
+  private async renderDefinitionPreservingPath(): Promise<string> {
+    let preservedPath: string | null = null;
+    try {
+      preservedPath = extractPathFromLaunchdPlist(await fs.readFile(this.definitionPath, "utf8"));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    return renderLaunchdPlist({
+      instanceId: this.instanceId,
+      shimPath: this.shimPath,
+      homeDir: this.homeDir,
+      stdoutPath: this.stdoutPath,
+      stderrPath: this.stderrPath,
+      preservedPath,
+    });
+  }
+
   async installedExecutablePath(): Promise<string | null> {
     try {
       return extractExecutableFromLaunchdPlist(await fs.readFile(this.definitionPath, "utf8"));
@@ -301,7 +325,7 @@ export class LaunchdServiceManager implements ServiceManager {
 
   async install(options: ServiceInstallOptions): Promise<{ changed: boolean }> {
     await fs.mkdir(path.dirname(this.stdoutPath), { recursive: true });
-    const changed = await writeIfChanged(this.definitionPath, this.renderDefinition());
+    const changed = await writeIfChanged(this.definitionPath, await this.renderDefinitionPreservingPath());
     if (changed) await this.runner("launchctl", ["bootout", `${this.domain}/${this.serviceName}`]).catch(() => undefined);
     await this.runner("launchctl", [options.startOnLogin ? "enable" : "disable", `${this.domain}/${this.serviceName}`]);
     if (options.startOnLogin || options.startNow) {
@@ -318,7 +342,7 @@ export class LaunchdServiceManager implements ServiceManager {
   }
   async start(): Promise<void> { await this.install({ startNow: true, startOnLogin: await this.isEnabled() }); }
   async stop(): Promise<void> { await this.runner("launchctl", ["bootout", `${this.domain}/${this.serviceName}`]); }
-  async restart(): Promise<void> { await writeIfChanged(this.definitionPath, this.renderDefinition()); await this.runner("launchctl", ["kickstart", "-k", `${this.domain}/${this.serviceName}`]); }
+  async restart(): Promise<void> { await writeIfChanged(this.definitionPath, await this.renderDefinitionPreservingPath()); await this.runner("launchctl", ["kickstart", "-k", `${this.domain}/${this.serviceName}`]); }
 
   async status(): Promise<ServiceStatus> {
     try {

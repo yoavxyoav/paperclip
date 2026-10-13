@@ -63,6 +63,19 @@ describe("service definition generation", () => {
     expect(plist).toContain("<key>KeepAlive</key><true/>");
     expect(plist).toContain("service.err.log");
   });
+
+  it("renders an explicitly preserved launchd PATH without copying other environment", () => {
+    const plist = renderLaunchdPlist({
+      instanceId: "team-a",
+      shimPath: "/Users/alice/.local/bin/paperclipai",
+      homeDir: "/Users/alice/.paperclip",
+      stdoutPath: "/tmp/stdout.log",
+      stderrPath: "/tmp/stderr.log",
+      preservedPath: "/Users/alice/.hermes/bin:/Users/alice/.local/bin:/usr/bin:/bin",
+    });
+    expect(plist).toContain("<key>PATH</key><string>/Users/alice/.hermes/bin:/Users/alice/.local/bin:/usr/bin:/bin</string>");
+    expect(plist).not.toContain("API_KEY");
+  });
 });
 
 describe("systemd drift regeneration", () => {
@@ -122,6 +135,33 @@ describe("service adapter dispatch", () => {
 });
 
 describe("launchd lifecycle", () => {
+  it("preserves an existing PATH across service install and restart", async () => {
+    const userHome = await temporaryDirectory();
+    const calls: string[] = [];
+    const runner: CommandRunner = async (command, args) => {
+      calls.push([command, ...args].join(" "));
+      return { stdout: "", stderr: "" };
+    };
+    const manager = new LaunchdServiceManager("team-a", runner, path.join(userHome, ".paperclip"), path.join(userHome, ".local/bin/paperclipai"), userHome);
+    const requiredPath = "/Users/alice/.hermes/bin:/Users/alice/.local/bin:/usr/bin:/bin";
+    await fs.mkdir(path.dirname(manager.definitionPath), { recursive: true });
+    await fs.writeFile(manager.definitionPath, renderLaunchdPlist({
+      instanceId: "team-a",
+      shimPath: "/stale/paperclipai",
+      homeDir: "/stale/home",
+      stdoutPath: "/tmp/stale.out",
+      stderrPath: "/tmp/stale.err",
+      preservedPath: requiredPath,
+    }), "utf8");
+
+    await manager.install({ startNow: true, startOnLogin: true });
+    expect(await fs.readFile(manager.definitionPath, "utf8")).toContain(`<key>PATH</key><string>${requiredPath}</string>`);
+
+    await manager.restart();
+    expect(await fs.readFile(manager.definitionPath, "utf8")).toContain(`<key>PATH</key><string>${requiredPath}</string>`);
+    expect(calls).toContain(`launchctl kickstart -k gui/${process.getuid?.() ?? 0}/ing.paperclip.paperclipai.team-a`);
+  });
+
   it("starts without changing the saved login preference", async () => {
     const userHome = await temporaryDirectory();
     const calls: string[] = [];
